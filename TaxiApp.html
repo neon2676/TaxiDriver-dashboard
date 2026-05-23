@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Driver Dashboard</title>
+<meta name="description" content="Track your daily taxi earnings, deductions and salary" />
+<meta name="theme-color" content="#080f1a" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Driver Dash" />
+<link rel="manifest" href="data:application/json;charset=utf-8,%7B%22name%22%3A%22Driver%20Dashboard%22%2C%22short_name%22%3A%22Driver%20Dash%22%2C%22description%22%3A%22Track%20your%20daily%20taxi%20earnings%22%2C%22start_url%22%3A%22.%22%2C%22display%22%3A%22standalone%22%2C%22background_color%22%3A%22%23080f1a%22%2C%22theme_color%22%3A%22%23080f1a%22%2C%22orientation%22%3A%22portrait%22%2C%22icons%22%3A%5B%7B%22src%22%3A%22data%3Aimage%2Fsvg%2Bxml%2C%253Csvg%2520xmlns%3D%2527http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%2527%2520viewBox%3D%270%25200%2520192%2520192%2527%253E%253Crect%2520width%3D%2527192%2527%2520height%3D%2527192%2527%2520rx%3D%252740%2527%2520fill%3D%2527%2523facc15%2527%2F%253E%253Ctext%2520x%3D%252796%2527%2520y%3D%2527130%2527%2520font-size%3D%2527110%2527%2520text-anchor%3D%2527middle%2527%253E%25F0%259F%259A%2595%253C%2F%2520text%253E%253C%2Fsvg%253E%22%2C%22sizes%22%3A%22192x192%22%2C%22type%22%3A%22image%2Fsvg%2Bxml%22%2C%22purpose%22%3A%22any%20maskable%22%7D%5D%7D" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #080f1a; font-family: 'Segoe UI', system-ui, sans-serif; color: #f1f5f9; }
+  input[type=number]::-webkit-inner-spin-button,
+  input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  input[type=number] { -moz-appearance: textfield; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+
+const STORAGE_KEY_SETTINGS = "taxiDash_v2_settings";
+const STORAGE_KEY_ENTRIES = "taxiDash_v2_entries";
+const APP_VERSION = "2.0";
+const DEFAULT_SETTINGS = {
+  fuelCostPerKm: 0.65,
+  rushHourRate: 10,
+  normalRate: 6,
+  withoutRate: 2.5,
+  airportRate: 15,
+  slabs: [
+    { min: 0, max: 59.99, commission: 0 },
+    { min: 60, max: 79.99, commission: 35 },
+    { min: 80, max: 99.99, commission: 40 },
+    { min: 100, max: 119.99, commission: 45 },
+    { min: 120, max: 999999, commission: 50 },
+  ],
+};
+
+const LS = {
+  get(key, fallback) {
+    try { const raw = localStorage.getItem(key); return raw !== null ? JSON.parse(raw) : fallback; } catch { return fallback; }
+  },
+  set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} },
+  remove(key) { try { localStorage.removeItem(key); } catch {} },
+  available() {
+    try { const t = "__ls_test__"; localStorage.setItem(t, "1"); localStorage.removeItem(t); return true; } catch { return false; }
+  },
+};
+
+function calcDay(entry, s) {
+  const fuel = (entry.hiredKm || 0) * s.fuelCostPerKm;
+  const bookings = (entry.rushHour || 0) * s.rushHourRate + (entry.normal || 0) * s.normalRate + (entry.without || 0) * s.withoutRate + (entry.airport || 0) * s.airportRate;
+  const totalDeduction = fuel + bookings + (entry.toll || 0);
+  const cleanMoney = (entry.income || 0) - totalDeduction;
+  return { fuel, bookings, totalDeduction, cleanMoney };
+}
+function findSlab(avg, slabs) { return slabs.find((s) => avg >= s.min && avg <= s.max) || null; }
+const n = (v, dec = 2) => Number(v || 0).toLocaleString("en-AU", { minimumFractionDigits: dec, maximumFractionDigits: dec });
+const $$ = (v) => `$${n(v)}`;
+const toNum = (v) => parseFloat(v) || 0;
+
+function downloadFile(filename, content, mimeType = "text/plain") {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); document.body.removeChild(a); }, 500);
+}
+
+function exportCSV(entries, settings) {
+  if (!entries.length) return;
+  const headers = ["Date","Income ($)","Hired KM","Rush Hour Bookings","Normal Bookings","Without Bookings","Airport Bookings","Toll ($)","Fuel Cost ($)","Booking Deductions ($)","Total Deduction ($)","Clean Money ($)"];
+  const rows = entries.slice().sort((a, b) => new Date(a.date) - new Date(b.date)).map((e) => {
+    const c = calcDay(e, settings);
+    return [e.date, n(e.income), n(e.hiredKm, 1), e.rushHour, e.normal, e.without, e.airport, n(e.toll), n(c.fuel), n(c.bookings), n(c.totalDeduction), n(c.cleanMoney)].join(",");
+  });
+  const totalClean = entries.reduce((s, e) => s + calcDay(e, settings).cleanMoney, 0);
+  const avg = totalClean / entries.length;
+  const slab = findSlab(avg, settings.slabs);
+  const commission = slab ? slab.commission : 0;
+  const salary = totalClean * (commission / 100);
+  rows.push(""); rows.push("SUMMARY"); rows.push(`Total Days,${entries.length}`); rows.push(`Total Clean Money ($),${n(totalClean)}`); rows.push(`Daily Average ($),${n(avg)}`); rows.push(`Commission %,${commission}%`); rows.push(`Estimated Salary ($),${n(salary)}`);
+  const now = new Date();
+  const filename = `TaxiEarnings_${now.getFullYear()}_${String(now.getMonth()+1).padStart(2,"0")}.csv`;
+  downloadFile(filename, [headers.join(","), ...rows].join("\n"), "text/csv;charset=utf-8;");
+}
+
+function exportBackup(entries, settings) {
+  const payload = { appVersion: APP_VERSION, exportedAt: new Date().toISOString(), settings, entries };
+  const now = new Date();
+  downloadFile(`TaxiDash_Backup_${now.toISOString().slice(0,10)}.json`, JSON.stringify(payload, null, 2), "application/json");
+}
+function parseBackup(text) {
+  const data = JSON.parse(text);
+  if (!data.settings || !Array.isArray(data.entries)) throw new Error("Invalid backup file.");
+  return { settings: data.settings, entries: data.entries };
+}
+
+const Icon = ({ d, size = 20, color = "currentColor" }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+    <path d={d} />
+  </svg>
+);
+const IC = {
+  plus: "M12 5v14M5 12h14", chart: "M18 20V10M12 20V4M6 20v-6",
+  history: "M3 3v5h5M3.05 13A9 9 0 1 0 6 5.3L3 8",
+  settings: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z",
+  trash: "M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2",
+  save: "M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2zM17 21v-8H7v8M7 3v5h8",
+  check: "M20 6L9 17l-5-5", x: "M18 6L6 18M6 6l12 12",
+  download: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3",
+  upload: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12",
+  shield: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z",
+  csv: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M16 13H8M16 17H8M10 9H8",
+};
+
+const S = {
+  card: { background: "linear-gradient(135deg,#1e293b 0%,#162032 100%)", borderRadius: 16, padding: "18px 16px", marginBottom: 12, border: "1px solid #334155", boxShadow: "0 4px 24px rgba(0,0,0,0.3)" },
+  label: { display: "block", fontSize: 11, fontWeight: 700, color: "#94a3b8", marginBottom: 4, letterSpacing: "0.06em", textTransform: "uppercase" },
+  input: { width: "100%", background: "#0f172a", border: "1px solid #334155", borderRadius: 10, padding: "11px 14px", color: "#f1f5f9", fontSize: 16, fontFamily: "inherit", outline: "none", boxSizing: "border-box", WebkitAppearance: "none" },
+};
+
+function Card({ children, style = {} }) { return <div style={{ ...S.card, ...style }}>{children}</div>; }
+function LabeledInput({ label, name, value, onChange, type = "number", step = "0.01", min = "0" }) {
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <label style={S.label}>{label}</label>
+      <input type={type} name={name} value={value} onChange={onChange} step={step} min={min} style={S.input} />
+    </div>
+  );
+}
+function StatBox({ label, value, color = "#facc15", sub }) {
+  return (
+    <div style={{ background: "#0f172a", borderRadius: 12, padding: "14px 12px", textAlign: "center", border: "1px solid #1e293b", flex: 1 }}>
+      <div style={{ fontSize: 10, color: "#64748b", fontWeight: 700, letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 6 }}>{label}</div>
+      <div style={{ fontSize: 19, fontWeight: 800, color, lineHeight: 1 }}>{value}</div>
+      {sub && <div style={{ fontSize: 10, color: "#475569", marginTop: 4 }}>{sub}</div>}
+    </div>
+  );
+}
+function ActionBtn({ onClick, children, color = "#facc15", textColor = "#0f172a", icon, disabled = false, style = {} }) {
+  return (
+    <button onClick={onClick} disabled={disabled} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, width: "100%", background: disabled ? "#1e293b" : color, color: disabled ? "#475569" : textColor, border: "none", borderRadius: 13, padding: "14px 16px", fontSize: 14, fontWeight: 800, cursor: disabled ? "not-allowed" : "pointer", letterSpacing: "0.04em", transition: "all 0.2s", marginBottom: 10, ...style }}>
+      {icon && <Icon d={icon} size={18} color={disabled ? "#475569" : textColor} />}
+      {children}
+    </button>
+  );
+}
+function SectionLabel({ children }) {
+  return <div style={{ fontSize: 11, fontWeight: 700, color: "#facc15", marginBottom: 12, letterSpacing: "0.07em" }}>{children}</div>;
+}
+function Toast({ msg, type = "success", onClose }) {
+  useEffect(() => { const t = setTimeout(onClose, 3000); return () => clearTimeout(t); }, [onClose]);
+  const bg = type === "error" ? "#ef4444" : type === "warn" ? "#f59e0b" : "#22c55e";
+  return (
+    <div style={{ position: "fixed", top: 20, left: "50%", transform: "translateX(-50%)", background: bg, color: "#fff", borderRadius: 12, padding: "12px 20px", fontWeight: 700, fontSize: 14, zIndex: 9999, boxShadow: "0 8px 32px rgba(0,0,0,0.5)", display: "flex", alignItems: "center", gap: 8, maxWidth: "90vw", textAlign: "center" }}>
+      <Icon d={type === "error" ? IC.x : IC.check} size={18} />{msg}
+    </div>
+  );
+}
+
+function TabBar({ tab, setTab }) {
+  const tabs = [
+    { id: "entry", label: "Add Day", icon: IC.plus },
+    { id: "summary", label: "Summary", icon: IC.chart },
+    { id: "history", label: "History", icon: IC.history },
+    { id: "settings", label: "Settings", icon: IC.settings },
+  ];
+  return (
+    <nav style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", background: "#080f1a", borderTop: "2px solid #1e293b", position: "fixed", bottom: 50, left: 0, right: 0, zIndex: 50, maxWidth: 500, margin: "0 auto" }}>
+      {tabs.map((t) => (
+        <button key={t.id} onClick={() => setTab(t.id)} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, padding: "10px 4px 14px", color: tab === t.id ? "#facc15" : "#475569", background: "none", border: "none", cursor: "pointer", fontSize: 9, fontFamily: "inherit", fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", borderTop: tab === t.id ? "2px solid #facc15" : "2px solid transparent", marginTop: -2 }}>
+          <Icon d={t.icon} size={22} color={tab === t.id ? "#facc15" : "#475569"} />{t.label}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+function PageHeader({ title, sub, noMargin }) {
+  return (
+    <div style={{ marginBottom: noMargin ? 0 : 16 }}>
+      <div style={{ fontSize: 22, fontWeight: 900, color: "#f1f5f9", letterSpacing: "-0.02em" }}>{title}</div>
+      {sub && <div style={{ fontSize: 13, color: "#64748b", marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+}
+
+const EMPTY = { date: new Date().toISOString().slice(0, 10), income: "", hiredKm: "", rushHour: "", normal: "", without: "", airport: "", toll: "" };
+
+function EntryTab({ settings, onSave }) {
+  const [form, setForm] = useState(EMPTY);
+  const handle = (e) => setForm((f) => ({ ...f, [e.target.name]: e.target.value }));
+  const p = form.income ? calcDay({ income: toNum(form.income), hiredKm: toNum(form.hiredKm), rushHour: toNum(form.rushHour), normal: toNum(form.normal), without: toNum(form.without), airport: toNum(form.airport), toll: toNum(form.toll) }, settings) : null;
+  const handleSave = () => {
+    if (!form.income) return;
+    onSave({ id: Date.now(), date: form.date, income: toNum(form.income), hiredKm: toNum(form.hiredKm), rushHour: toNum(form.rushHour), normal: toNum(form.normal), without: toNum(form.without), airport: toNum(form.airport), toll: toNum(form.toll) });
+    setForm(EMPTY);
+  };
+  return (
+    <div>
+      <PageHeader title="Add Daily Entry" sub="Enter today's trip details" />
+      <Card>
+        <LabeledInput label="Date" name="date" value={form.date} onChange={handle} type="date" step={null} min={null} />
+        <LabeledInput label="Total Income ($)" name="income" value={form.income} onChange={handle} />
+        <LabeledInput label="Hired Kilometers (km)" name="hiredKm" value={form.hiredKm} onChange={handle} step="0.1" />
+      </Card>
+      <Card>
+        <SectionLabel>BOOKING COUNTS</SectionLabel>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
+          <LabeledInput label="Rush Hour" name="rushHour" value={form.rushHour} onChange={handle} step="1" />
+          <LabeledInput label="Normal" name="normal" value={form.normal} onChange={handle} step="1" />
+          <LabeledInput label="Without" name="without" value={form.without} onChange={handle} step="1" />
+          <LabeledInput label="Airport" name="airport" value={form.airport} onChange={handle} step="1" />
+        </div>
+        <LabeledInput label="Toll Price ($)" name="toll" value={form.toll} onChange={handle} />
+      </Card>
+      {p && (
+        <Card style={{ borderColor: "#22c55e44" }}>
+          <SectionLabel>LIVE PREVIEW</SectionLabel>
+          {[["Fuel Cost", p.fuel, "#f97316"], ["Booking Deductions", p.bookings, "#a855f7"], ["Toll", toNum(form.toll), "#64748b"], ["Total Deduction", p.totalDeduction, "#ef4444"]].map(([l, v, c]) => (
+            <div key={l} style={{ display: "flex", justifyContent: "space-between", fontSize: 14, marginBottom: 6 }}>
+              <span style={{ color: "#94a3b8" }}>{l}</span>
+              <span style={{ color: c, fontWeight: 700 }}>−{$$(v)}</span>
+            </div>
+          ))}
+          <div style={{ borderTop: "1px solid #334155", marginTop: 8, paddingTop: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontSize: 15, fontWeight: 800, color: "#f1f5f9" }}>Clean Money</span>
+            <span style={{ fontSize: 24, fontWeight: 900, color: p.cleanMoney >= 0 ? "#22c55e" : "#ef4444" }}>{$$(p.cleanMoney)}</span>
+          </div>
+        </Card>
+      )}
+      <ActionBtn onClick={handleSave} disabled={!form.income} icon={IC.save} color="linear-gradient(135deg,#facc15,#f59e0b)" style={{ fontSize: 16, padding: "16px", marginBottom: 0 }}>SAVE THIS DAY</ActionBtn>
+    </div>
+  );
+}
+
+function SummaryTab({ entries, settings, onToast }) {
+  if (!entries.length) return (
+    <div style={{ textAlign: "center", paddingTop: 60 }}>
+      <div style={{ fontSize: 52, marginBottom: 16 }}>🚕</div>
+      <div style={{ fontSize: 18, fontWeight: 700, color: "#475569" }}>No entries yet</div>
+      <div style={{ fontSize: 14, color: "#334155", marginTop: 6 }}>Add your first day to see the summary</div>
+    </div>
+  );
+  const calcs = entries.map((e) => calcDay(e, settings));
+  const totalClean = calcs.reduce((s, c) => s + c.cleanMoney, 0);
+  const totalIncome = entries.reduce((s, e) => s + e.income, 0);
+  const totalDeduct = calcs.reduce((s, c) => s + c.totalDeduction, 0);
+  const activeDays = entries.length;
+  const dailyAvg = totalClean / activeDays;
+  const slab = findSlab(dailyAvg, settings.slabs);
+  const commission = slab ? slab.commission : 0;
+  const salary = totalClean * (commission / 100);
+  return (
+    <div>
+      <PageHeader title="Monthly Summary" sub={`${activeDays} working ${activeDays === 1 ? "day" : "days"} recorded`} />
+      <Card style={{ background: "linear-gradient(135deg,#0f2a1a,#0a1f14)", borderColor: "#166534" }}>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: "#4ade80", letterSpacing: "0.1em" }}>🏆 ESTIMATED SALARY THIS MONTH</div>
+          <div style={{ fontSize: 52, fontWeight: 900, color: "#22c55e", lineHeight: 1.1, margin: "8px 0" }}>{$$(salary)}</div>
+          <div style={{ fontSize: 14, color: "#4ade80" }}>{commission}% commission on {$$(totalClean)} clean money</div>
+        </div>
+      </Card>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
+        <StatBox label="Active Days" value={activeDays} color="#60a5fa" />
+        <StatBox label="Daily Average" value={$$(dailyAvg)} color="#facc15" />
+        <StatBox label="Total Clean $" value={$$(totalClean)} color="#22c55e" />
+        <StatBox label="Commission" value={`${commission}%`} color="#f97316" sub={slab ? `$${n(slab.min,0)}–${slab.max > 99998 ? "∞" : "$"+n(slab.max,0)} avg` : "No slab"} />
+      </div>
+      <Card>
+        <SectionLabel>MONTH BREAKDOWN</SectionLabel>
+        {[["Total Revenue", totalIncome, "#60a5fa"], ["Total Deductions", totalDeduct, "#ef4444"], ["Total Clean Money", totalClean, "#22c55e"]].map(([l, v, c]) => (
+          <div key={l} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 0", borderBottom: "1px solid #1e293b" }}>
+            <span style={{ color: "#94a3b8", fontSize: 14 }}>{l}</span>
+            <span style={{ color: c, fontWeight: 800, fontSize: 17 }}>{$$(v)}</span>
+          </div>
+        ))}
+      </Card>
+      <Card>
+        <SectionLabel>COMMISSION SLABS</SectionLabel>
+        {settings.slabs.map((s, i) => {
+          const active = slab && s.min === slab.min;
+          return (
+            <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 12px", borderRadius: 9, marginBottom: 4, background: active ? "rgba(250,204,21,0.12)" : "transparent", border: active ? "1px solid rgba(250,204,21,0.35)" : "1px solid transparent" }}>
+              <span style={{ color: active ? "#facc15" : "#64748b", fontSize: 13, fontWeight: active ? 700 : 400 }}>${n(s.min,0)} – {s.max > 99998 ? "∞" : "$"+n(s.max,0)} avg/day</span>
+              <span style={{ color: active ? "#facc15" : "#475569", fontWeight: 800, fontSize: 15 }}>{active ? "✓ " : ""}{s.commission}%</span>
+            </div>
+          );
+        })}
+      </Card>
+      <Card style={{ borderColor: "#1e40af55" }}>
+        <SectionLabel>📥 DOWNLOAD DATA</SectionLabel>
+        <div style={{ fontSize: 13, color: "#64748b", marginBottom: 12, lineHeight: 1.6 }}>Export all daily entries as a spreadsheet file. Open with Excel, Google Sheets, or Numbers.</div>
+        <ActionBtn onClick={() => { exportCSV(entries, settings); onToast("CSV file downloaded! ✓"); }} icon={IC.csv} color="linear-gradient(135deg,#1d4ed8,#1e40af)" textColor="#fff">DOWNLOAD MONTH AS CSV / EXCEL</ActionBtn>
+      </Card>
+    </div>
+  );
+}
+
+function HistoryTab({ entries, settings, onDelete, onReset, onToast }) {
+  const [confirmReset, setConfirmReset] = useState(false);
+  const sorted = [...entries].sort((a, b) => new Date(b.date) - new Date(a.date));
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 16 }}>
+        <PageHeader title="History" sub={`${entries.length} days logged`} noMargin />
+        {entries.length > 0 && (
+          confirmReset ? (
+            <div style={{ display: "flex", gap: 6 }}>
+              <button onClick={() => { onReset(); setConfirmReset(false); }} style={{ background: "#ef4444", color: "#fff", border: "none", borderRadius: 8, padding: "7px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>CONFIRM RESET</button>
+              <button onClick={() => setConfirmReset(false)} style={{ background: "#1e293b", color: "#94a3b8", border: "none", borderRadius: 8, padding: "7px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>CANCEL</button>
+            </div>
+          ) : (
+            <button onClick={() => setConfirmReset(true)} style={{ background: "transparent", color: "#ef4444", border: "1px solid #ef4444", borderRadius: 9, padding: "7px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>RESET MONTH</button>
+          )
+        )}
+      </div>
+      {entries.length > 0 && (
+        <ActionBtn onClick={() => { exportCSV(entries, settings); onToast("CSV downloaded! ✓"); }} icon={IC.download} color="linear-gradient(135deg,#1d4ed8,#1e40af)" textColor="#fff" style={{ marginBottom: 14 }}>DOWNLOAD CSV</ActionBtn>
+      )}
+      {sorted.length === 0 ? (
+        <div style={{ textAlign: "center", paddingTop: 60, color: "#475569" }}>
+          <div style={{ fontSize: 44, marginBottom: 12 }}>📋</div>
+          <div style={{ fontWeight: 700 }}>No history yet</div>
+        </div>
+      ) : (
+        sorted.map((entry) => {
+          const c = calcDay(entry, settings);
+          const dateLabel = new Date(entry.date + "T12:00:00").toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" });
+          return (
+            <Card key={entry.id} style={{ padding: "14px 14px 10px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#facc15" }}>{dateLabel}</div>
+                  <div style={{ fontSize: 22, fontWeight: 900, color: c.cleanMoney >= 0 ? "#22c55e" : "#ef4444", marginTop: 2 }}>
+                    {$$(c.cleanMoney)} <span style={{ fontSize: 11, color: "#475569", fontWeight: 400, marginLeft: 4 }}>clean</span>
+                  </div>
+                </div>
+                <button onClick={() => onDelete(entry.id)} style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 8, padding: "7px 8px", cursor: "pointer", color: "#ef4444", display: "flex", alignItems: "center" }}>
+                  <Icon d={IC.trash} size={16} color="#ef4444" />
+                </button>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 6, marginBottom: 8 }}>
+                {[["Revenue", $$(entry.income), "#60a5fa"], ["Fuel", $$(c.fuel), "#f97316"], ["Deductions", $$(c.totalDeduction), "#ef4444"]].map(([l, v, col]) => (
+                  <div key={l} style={{ background: "#0f172a", borderRadius: 8, padding: "6px 4px", textAlign: "center" }}>
+                    <div style={{ fontSize: 9, color: "#475569", fontWeight: 700, letterSpacing: "0.04em" }}>{l}</div>
+                    <div style={{ fontSize: 12, fontWeight: 800, color: col, marginTop: 2 }}>{v}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                {[["Rush", entry.rushHour], ["Normal", entry.normal], ["No Book", entry.without], ["Airport", entry.airport]].filter(([,v]) => v > 0).map(([l, v]) => (
+                  <span key={l} style={{ fontSize: 10, fontWeight: 700, background: "#1e293b", color: "#94a3b8", borderRadius: 6, padding: "2px 8px" }}>{l}: {v}</span>
+                ))}
+                {entry.hiredKm > 0 && <span style={{ fontSize: 10, fontWeight: 700, background: "#1e293b", color: "#94a3b8", borderRadius: 6, padding: "2px 8px" }}>{n(entry.hiredKm,1)} km</span>}
+                {entry.toll > 0 && <span style={{ fontSize: 10, fontWeight: 700, background: "#1e293b", color: "#94a3b8", borderRadius: 6, padding: "2px 8px" }}>Toll: {$$(entry.toll)}</span>}
+              </div>
+            </Card>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
+function SettingsTab({ settings, entries, onSaveSettings, onRestoreBackup, onToast, lsAvailable }) {
+  const [local, setLocal] = useState(() => JSON.parse(JSON.stringify(settings)));
+  const [saved, setSaved] = useState(false);
+  const [importErr, setImportErr] = useState("");
+  const fileRef = useRef(null);
+  useEffect(() => { setLocal(JSON.parse(JSON.stringify(settings))); }, [settings]);
+  const handleRate = (k, v) => setLocal((s) => ({ ...s, [k]: parseFloat(v) || 0 }));
+  const handleSlab = (i, k, v) => setLocal((s) => ({ ...s, slabs: s.slabs.map((sl, idx) => idx === i ? { ...sl, [k]: parseFloat(v) || 0 } : sl) }));
+  const addSlab = () => setLocal((s) => ({ ...s, slabs: [...s.slabs, { min: 0, max: 0, commission: 0 }] }));
+  const removeSlab = (i) => setLocal((s) => ({ ...s, slabs: s.slabs.filter((_, idx) => idx !== i) }));
+  const handleSave = () => { onSaveSettings(local); setSaved(true); setTimeout(() => setSaved(false), 2200); onToast("Settings saved!"); };
+  const handleExportBackup = () => { exportBackup(entries, settings); onToast("Backup file downloaded! Keep it safe ✓"); };
+  const handleImportClick = () => { setImportErr(""); fileRef.current && fileRef.current.click(); };
+  const handleFileChange = (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try { const { settings: s, entries: en } = parseBackup(ev.target.result); onRestoreBackup(s, en); onToast("Backup restored successfully! ✓"); setImportErr(""); }
+      catch (err) { setImportErr("❌ Invalid backup file. Please choose a valid TaxiDash backup (.json)."); }
+    };
+    reader.readAsText(file); e.target.value = "";
+  };
+  const rateFields = [
+    { key: "fuelCostPerKm", label: "Fuel Cost per KM ($)" },
+    { key: "rushHourRate", label: "Rush Hour Booking Deduction ($)" },
+    { key: "normalRate", label: "Normal Booking Deduction ($)" },
+    { key: "withoutRate", label: "Without Booking Deduction ($)" },
+    { key: "airportRate", label: "Airport Booking Deduction ($)" },
+  ];
+  return (
+    <div>
+      <PageHeader title="Settings" sub="Rates, slabs & data management" />
+      <div style={{ padding: "10px 14px", borderRadius: 10, marginBottom: 14, background: lsAvailable ? "rgba(34,197,94,0.08)" : "rgba(239,68,68,0.1)", border: `1px solid ${lsAvailable ? "rgba(34,197,94,0.25)" : "rgba(239,68,68,0.3)"}`, fontSize: 12, color: lsAvailable ? "#4ade80" : "#f87171", display: "flex", alignItems: "center", gap: 8 }}>
+        <Icon d={IC.shield} size={14} color={lsAvailable ? "#4ade80" : "#f87171"} />
+        {lsAvailable ? "✓ Local Storage active – your data is saved automatically in this browser." : "⚠ Local Storage unavailable. Open the file directly in your mobile browser for full persistence."}
+      </div>
+      <Card>
+        <SectionLabel>DEDUCTION RATES</SectionLabel>
+        {rateFields.map(({ key, label }) => (
+          <LabeledInput key={key} label={label} name={key} value={local[key]} onChange={(e) => handleRate(key, e.target.value)} step="0.01" />
+        ))}
+      </Card>
+      <Card>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <SectionLabel>COMMISSION SLABS</SectionLabel>
+          <button onClick={addSlab} style={{ background: "#1e293b", color: "#facc15", border: "1px solid #facc15", borderRadius: 8, padding: "4px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>+ ADD ROW</button>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 0.8fr auto", gap: "4px 6px", marginBottom: 6 }}>
+          {["Min Avg $", "Max Avg $", "Comm %", ""].map((h, i) => (
+            <div key={i} style={{ fontSize: 9, color: "#475569", fontWeight: 700, letterSpacing: "0.06em", textAlign: "center", paddingBottom: 4 }}>{h}</div>
+          ))}
+          {local.slabs.map((s, i) => (
+            <React.Fragment key={i}>
+              {["min","max","commission"].map((k) => (
+                <input key={k} type="number" value={s[k]} onChange={(e) => handleSlab(i, k, e.target.value)} style={{ ...S.input, padding: "9px 4px", fontSize: 13, textAlign: "center", borderRadius: 8 }} />
+              ))}
+              <button onClick={() => removeSlab(i)} style={{ background: "rgba(239,68,68,0.08)", border: "none", borderRadius: 8, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <Icon d={IC.x} size={14} color="#ef4444" />
+              </button>
+            </React.Fragment>
+          ))}
+        </div>
+        <div style={{ fontSize: 10, color: "#475569" }}>Ranges match against Daily Average Clean Money</div>
+      </Card>
+      <button onClick={handleSave} style={{ width: "100%", background: saved ? "#22c55e" : "linear-gradient(135deg,#facc15,#f59e0b)", color: saved ? "#fff" : "#0f172a", border: "none", borderRadius: 13, padding: "15px", fontSize: 15, fontWeight: 900, cursor: "pointer", letterSpacing: "0.04em", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, transition: "all 0.3s", marginBottom: 20 }}>
+        <Icon d={saved ? IC.check : IC.save} size={19} color={saved ? "#fff" : "#0f172a"} />
+        {saved ? "SETTINGS SAVED!" : "SAVE SETTINGS"}
+      </button>
+      <Card style={{ borderColor: "#7c3aed44" }}>
+        <SectionLabel>🛡️ BACKUP &amp; RESTORE</SectionLabel>
+        <div style={{ fontSize: 13, color: "#64748b", marginBottom: 14, lineHeight: 1.65 }}>Your data lives in your browser's storage. Export a backup file regularly so you never lose it – especially before clearing your browser or switching phones.</div>
+        <div style={{ background: "#0f172a", borderRadius: 12, padding: "14px", marginBottom: 10, border: "1px solid #1e293b" }}>
+          <div style={{ fontWeight: 700, color: "#c4b5fd", fontSize: 13, marginBottom: 4 }}>📤 Export Backup</div>
+          <div style={{ fontSize: 12, color: "#475569", marginBottom: 10, lineHeight: 1.5 }}>Downloads a <strong style={{ color: "#94a3b8" }}>.json</strong> file with all settings AND entries. Save to Google Drive, iCloud, or WhatsApp to yourself.</div>
+          <ActionBtn onClick={handleExportBackup} icon={IC.download} color="linear-gradient(135deg,#7c3aed,#6d28d9)" textColor="#fff" style={{ marginBottom: 0 }}>EXPORT BACKUP FILE ({entries.length} days + settings)</ActionBtn>
+        </div>
+        <div style={{ background: "#0f172a", borderRadius: 12, padding: "14px", border: "1px solid #1e293b" }}>
+          <div style={{ fontWeight: 700, color: "#86efac", fontSize: 13, marginBottom: 4 }}>📥 Import Backup</div>
+          <div style={{ fontSize: 12, color: "#475569", marginBottom: 10, lineHeight: 1.5 }}>Choose a previously exported <strong style={{ color: "#94a3b8" }}>TaxiDash backup .json</strong> file. <strong style={{ color: "#f87171" }}>This will replace your current data.</strong></div>
+          <ActionBtn onClick={handleImportClick} icon={IC.upload} color="linear-gradient(135deg,#15803d,#166534)" textColor="#fff" style={{ marginBottom: 0 }}>CHOOSE BACKUP FILE TO RESTORE</ActionBtn>
+          <input ref={fileRef} type="file" accept=".json,application/json" onChange={handleFileChange} style={{ display: "none" }} />
+          {importErr && <div style={{ marginTop: 10, padding: "10px 12px", background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 8, fontSize: 12, color: "#f87171" }}>{importErr}</div>}
+        </div>
+      </Card>
+      <div style={{ height: 10 }} />
+    </div>
+  );
+}
+
+function App() {
+  const lsAvailable = LS.available();
+  const [tab, setTab] = useState("entry");
+  const [toast, setToast] = useState(null);
+  const [settings, setSettings] = useState(() => LS.get(STORAGE_KEY_SETTINGS, DEFAULT_SETTINGS));
+  const [entries, setEntries] = useState(() => LS.get(STORAGE_KEY_ENTRIES, []));
+  useEffect(() => { LS.set(STORAGE_KEY_SETTINGS, settings); }, [settings]);
+  useEffect(() => { LS.set(STORAGE_KEY_ENTRIES, entries); }, [entries]);
+  const showToast = useCallback((msg, type = "success") => setToast({ msg, type }), []);
+  const handleSaveEntry = useCallback((entry) => { setEntries((e) => [...e, entry]); showToast("Day saved and stored! ✓"); setTab("summary"); }, [showToast]);
+  const handleDeleteEntry = useCallback((id) => { setEntries((e) => e.filter((x) => x.id !== id)); showToast("Entry deleted"); }, [showToast]);
+  const handleReset = useCallback(() => { setEntries([]); LS.set(STORAGE_KEY_ENTRIES, []); showToast("Month reset!", "warn"); }, [showToast]);
+  const handleSaveSettings = useCallback((s) => { setSettings(s); LS.set(STORAGE_KEY_SETTINGS, s); }, []);
+  const handleRestoreBackup = useCallback((s, en) => { setSettings(s); setEntries(en); LS.set(STORAGE_KEY_SETTINGS, s); LS.set(STORAGE_KEY_ENTRIES, en); }, []);
+  const totalClean = entries.reduce((s, e) => s + calcDay(e, settings).cleanMoney, 0);
+  return (
+    <div style={{ background: "#080f1a", minHeight: "100vh", fontFamily: "'Segoe UI',system-ui,sans-serif", color: "#f1f5f9" }}>
+      <header style={{ background: "linear-gradient(180deg,#0f172a 0%,rgba(15,23,42,0.96) 100%)", padding: "14px 18px 12px", borderBottom: "1px solid #1e293b", display: "flex", alignItems: "center", gap: 12, position: "sticky", top: 0, zIndex: 40, backdropFilter: "blur(12px)" }}>
+        <div style={{ width: 40, height: 40, borderRadius: 11, background: "linear-gradient(135deg,#facc15,#f59e0b)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+          <span style={{ fontSize: 22 }}>🚕</span>
+        </div>
+        <div>
+          <div style={{ fontSize: 17, fontWeight: 900, color: "#f1f5f9", letterSpacing: "-0.01em", lineHeight: 1 }}>Driver Dashboard</div>
+          <div style={{ fontSize: 10, color: "#475569", marginTop: 2, fontWeight: 600, letterSpacing: "0.06em" }}>TRACK · EARN · GROW</div>
+        </div>
+        <div style={{ marginLeft: "auto", textAlign: "right" }}>
+          <div style={{ fontSize: 10, color: "#475569", fontWeight: 600, letterSpacing: "0.04em" }}>{entries.length} DAY{entries.length !== 1 ? "S" : ""}</div>
+          <div style={{ fontSize: 15, fontWeight: 800, color: totalClean >= 0 ? "#22c55e" : "#ef4444" }}>{$$(totalClean)}</div>
+        </div>
+      </header>
+      <main style={{ padding: "18px 15px 160px", maxWidth: 500, margin: "0 auto" }}>
+        {tab === "entry" && <EntryTab settings={settings} onSave={handleSaveEntry} />}
+        {tab === "summary" && <SummaryTab entries={entries} settings={settings} onToast={showToast} />}
+        {tab === "history" && <HistoryTab entries={entries} settings={settings} onDelete={handleDeleteEntry} onReset={handleReset} onToast={showToast} />}
+        {tab === "settings" && <SettingsTab settings={settings} entries={entries} onSaveSettings={handleSaveSettings} onRestoreBackup={handleRestoreBackup} onToast={showToast} lsAvailable={lsAvailable} />}
+      </main>
+      <TabBar tab={tab} setTab={setTab} />
+      {toast && <Toast msg={toast.msg} type={toast.type} onClose={() => setToast(null)} />}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+<script>
+if ('serviceWorker' in navigator) {
+  const swCode = `
+    self.addEventListener('install', e => self.skipWaiting());
+    self.addEventListener('activate', e => self.clients.claim());
+    self.addEventListener('fetch', e => e.respondWith(fetch(e.request).catch(() => caches.match(e.request))));
+  `;
+  const blob = new Blob([swCode], { type: 'application/javascript' });
+  const swUrl = URL.createObjectURL(blob);
+  navigator.serviceWorker.register(swUrl).catch(() => {});
+}
+</script>
+</body>
+</html>
